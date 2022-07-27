@@ -1,3 +1,4 @@
+from dis import dis
 from math import ceil
 import os
 import torch
@@ -18,7 +19,7 @@ class NICP():
         self.max_iterator = max_iterator
         self.lr = lr
         self.tolerance = tolerance
-        self.device = "cuda:0"
+
     def downsample(self,points_arr, num_pts):
         '''
         下采样
@@ -44,6 +45,27 @@ class NICP():
         
         return points_arr
 
+    def downsample_index(self,points_arr,num_pts):
+        '''
+        随机采样 返回索引点
+        '''
+        is_torch = isinstance(points_arr, torch.Tensor)
+        N = points_arr.size(0) if is_torch else points_arr.shape[0]
+        print(f"### down sample point cloud [{N}] to [{num_pts}]")
+        samp_inds = torch.arange(N) if is_torch else np.arange(N)
+        if N == 0:
+            return samp_inds
+        
+        if N > num_pts:
+            samp_inds = np.random.choice(np.arange(N), size=num_pts, replace=False)
+        elif N < num_pts:
+            while samp_inds.shape[0] < num_pts:
+                pad_size = num_pts - (samp_inds.size(0) if is_torch else samp_inds.shape[0])
+                if is_torch:
+                    samp_inds = torch.cat([samp_inds, samp_inds[:pad_size]], dim=0)
+                else:
+                    samp_inds = np.concatenate([samp_inds, samp_inds[:pad_size]], axis=0)
+        return samp_inds
 
     def get_nearly_points(self,points_one:np.ndarray,points_two:np.ndarray,K=4,dis_threshold = 0.1):
         '''
@@ -70,7 +92,10 @@ class NICP():
                     M[line_index,row] = 1
                     M[line_index,i] = -1
                     line_index += 1
-        
+        assert K == 4
+        '''
+        如果K!=4 下面验证是否有距离小于阈值的临近点的判断条件就需要改
+        '''
         valid = np.logical_or.reduce([dist[:,0] < dis_threshold,dist[:,1] < dis_threshold,dist[:,2] < dis_threshold,dist[:,3] < dis_threshold])
         W = np.diag(valid.astype(int)) # n *n 的权重矩阵，如果点的距离大于阈值 那么权重值为0否则为1 表示有临近点
         print(f"### build node-arc matrix shape is [{M.shape}]")
@@ -118,6 +143,34 @@ class NICP():
             D[i,[4*i,4*i+1,4*i+2,4*i+3]] = points[i]
         return D
 
+    def precess_with_color(self,down_sample = 4096,G_lam = 0.5,K = 4,dis_threshold = 0.1):
+        # 更具索引下采样，保留颜色信息
+        one_index = self.downsample_index(self.points_one,down_sample)
+        points_one = self.points_one[one_index,:]
+        color_one = self.color_one[one_index,:]
+
+        # 构建矩阵 U # 更具索引下采样，保留颜色信息
+        two_index = self.downsample_index(self.points_two,down_sample)
+        U = self.points_two[two_index,:]  # n * 3
+        color_two = self.color_two[two_index,:]
+
+        # 构建图 返回M x G 矩阵
+        matrix_up,W = self.create_graph(points_one,U,G_lam,K,dis_threshold) # 4m * 4n
+        # 构建矩阵 D
+        matrix_down = self.build_distance_matrix(points_one) # n* 4n
+        
+
+        # W = np.random.randn(down_sample,down_sample*4) # n* 4n
+        A = np.vstack((matrix_up,matrix_down)) # (4m+n) * 4n
+        B = np.vstack((np.zeros((matrix_up.shape[0],3)),U)) # (4m+n) * 3
+        # inv(4n*4n) * (4n * (4m+n)) *(4m+n * 3) = 4n*3
+        # 每4行3列是一个旋转矩阵
+        device = "cuda:0"
+        A = torch.from_numpy(A).to(device)
+        B = torch.from_numpy(B).to(device)
+        W = torch.mm(torch.inverse(torch.mm(A.T,A)),torch.mm(A.T,B)).cpu().numpy()
+        # W = np.linalg.inv(A.T @ A) @ (A.T @ B)
+        return points_one,color_one,U,color_two,W
 
     def process_cpu(self,down_sample = 4096,lam = 0.5,K = 4):
         # 下采样
@@ -131,18 +184,14 @@ class NICP():
         # X每4行3列是一个旋转矩阵
         X = np.random.rand(4*down_sample,3) # 4*n * 3
         alpha = np.linspace(0.1,1,10)[::-1] # 刚性系数
-
-        alpha = np.linspace(0.1,1,10) # 刚性系数
         # min(||AX-B||)
-        # ipdb.set_trace()
-
         B = np.vstack((np.zeros((matrix_up.shape[0],3)),W @ U,U)) # (4m+n) * 3
-
+        
         for a in alpha:
             X_temp = np.copy(X) # 4*n * 3
             A = np.vstack((a * matrix_up,W @ matrix_down,matrix_down)) # (4m+n) * 4n
             for i in range(self.max_iterator):
-                
+
                 # inv(4n*4n) * (4n * (4m+n)) *(4m+n * 3) = 4n*3
                 loss = np.sqrt(np.sum(np.power(A @ X_temp - B,2))) # ||AX-B||^2
                 # E'(x) = A.T(AX-B)
@@ -217,8 +266,14 @@ def draw_points(points_one,colors_one,points_two,colors_two):
     pcd_two.points = o3d.utility.Vector3dVector(points_two)
     pcd_two.colors = o3d.utility.Vector3dVector(colors_two)
 
+    # pcd_one.estimate_normals()
+    # distances = pcd_one.compute_nearest_neighbor_distance()
+    # avg_dist = np.mean(distances)
+    # radius = 1.5 * avg_dist
+    # mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(pcd_one,o3d.utility.DoubleVector([radius, radius * 2]))
+    # o3d.visualization.draw_geometries([mesh])
 
-def nicp():
+def nicp_v2():
     root_path = os.path.join("./data")
     with open(os.path.join(root_path,"00000_D2986_C2932.pkl"),'rb') as file:
         frame_one = pickle.load(file)
@@ -228,8 +283,8 @@ def nicp():
     print(f"load pkl file and pkl file keys {frame_one.keys()}")
     points_one = frame_one["points"].numpy()
     points_two = frame_two["points"].numpy()
-    nicp = NICP(frame_one,frame_two,max_iterator=200)
-    points_one,points_two,W = nicp.precess_torch(down_sample=4096*2)
+    nicp = NICP(frame_one,frame_two)
+    points_one,color_one,points_two,color_two,W = nicp.precess_v2(down_sample=4096)
     # n * 3 W = 4n * 3
     one = np.ones((points_one.shape[0],1))
     temp_points = np.hstack((points_one,one))
@@ -239,6 +294,49 @@ def nicp():
     for index,row in enumerate(temp_points):
         row = row.reshape(1,-1)
         new_points = row @ W[index*4:index*4+4,:] # 1*4 4*3
+        new_points_list.append(new_points)
+
+    new_points_list = np.array(new_points_list).squeeze()
+    # ipdb.set_trace()
+    diff = new_points_list - points_two
+    diff = np.sqrt(np.sum(diff ** 2))
+    print(f"### transformation diff is {diff}")
+    # draw_points(new_points_list,color_one,points_two,color_two)
+    
+    with open("./output_0_50/points_one.pkl",'wb') as file:
+        points_write = {}
+        points_write["points"] = points_one
+        points_write["color"] = color_one
+        points_write["transform_points"] = new_points_list
+        pickle.dump(points_write,file)
+
+    with open("./output_0_50/points_two.pkl",'wb') as file:
+        points_write = {}
+        points_write["points"] = points_two
+        points_write["color"] = color_two
+        pickle.dump(points_write,file)
+
+def nicp():
+    root_path = os.path.join("./data")
+    with open(os.path.join(root_path,"00000_D2986_C2932.pkl"),'rb') as file:
+        frame_one = pickle.load(file)
+
+    with open(os.path.join(root_path,"00050_D3036_C2982.pkl"),'rb') as file:
+        frame_two = pickle.load(file)
+    print(f"load pkl file and pkl file keys {frame_one.keys()}")
+    points_one = frame_one["points"].numpy()
+    points_two = frame_two["points"].numpy()
+    nicp = NICP(frame_one,frame_two,max_iterator=200)
+    points_one,points_two,X = nicp.process_cpu(down_sample=4096*3)
+    # n * 3 W = 4n * 3
+    one = np.ones((points_one.shape[0],1))
+    temp_points = np.hstack((points_one,one))
+
+    new_points_list = []
+    # 坐标转换
+    for index,row in enumerate(temp_points):
+        row = row.reshape(1,-1)
+        new_points = row @ X[index*4:index*4+4,:] # 1*4 4*3
         new_points_list.append(new_points)
 
     new_points_list = np.array(new_points_list).squeeze()
