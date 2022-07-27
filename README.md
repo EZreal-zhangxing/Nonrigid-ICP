@@ -39,5 +39,10 @@ python nicp.py
 python load_data.py
 ```
 
+### 配准前
 
+![image-20220727214021032](image-20220727214021032.png)
 
+### 配准后
+
+![image-20220727214029011](image-20220727214029011.png)
