@@ -7,10 +7,12 @@ import pickle
 import ipdb
 from sklearn.neighbors import KDTree
 import open3d as o3d
+import timeit
 
 
 class NICP():
     def __init__(self,frame_one,frame_two,max_iterator = 5,lr = 0.001,device = "cuda:0",tolerance = 5) -> None:
+       
         self.device = device
         self.points_one = frame_one["points"].numpy()
         self.points_two = frame_two["points"].numpy()
@@ -70,14 +72,14 @@ class NICP():
     def get_nearly_points(self,points_one:np.ndarray,points_two:np.ndarray,K=4,dis_threshold = 0.1):
         '''
         v1:
-        获取临近点，使用KDtree
+        获取临近点,使用KDtree
         K 表示获取临近点的数量 默认是4个
         v2:
         此处没有使用查找半径
         可以使用半径阈值，对于距离超过这个阈值可以视为没有连接点
         '''
-        tree = KDTree(points_two,leaf_size = ceil(K/2))
-        dist,ind = tree.query(points_one,k=K)
+        tree = KDTree(points_two,leaf_size = ceil(K/2)) # 使用点云2构建KDtree
+        dist,ind = tree.query(points_one,k=K) # 用点云1查询临近点
         # ipdb.set_trace()
         print(f"### query points min distance {np.min(dist)} max distance [{np.max(dist)}]")
         points_num = points_one.shape[0] # sample_num  = 4096
@@ -92,6 +94,7 @@ class NICP():
                     M[line_index,row] = 1
                     M[line_index,i] = -1
                     line_index += 1
+
         assert K == 4
         '''
         如果K!=4 下面验证是否有距离小于阈值的临近点的判断条件就需要改
@@ -114,7 +117,9 @@ class NICP():
         return matrix_up,W
 
     def draw_graph(self,points,lines):
-        
+        '''
+        绘制图
+        '''
         points_num = points.shape[0]
         lines_matrix = np.zeros((3*points_num,2)) 
         
@@ -201,7 +206,7 @@ class NICP():
 
                 print(f"#### alpha is [{a}] inner iterator nums [{i}] loss is [{loss}] and X diff is [{diff}]")
                 '''
-                原文这里使用的是 前后旋转矩阵的差值diff小于阈值既可以退出，这里改成了点集差 loss
+                原文这里使用的是 前后旋转矩阵的差值diff小于阈值既可以退出,这里改成了点集差 loss
                 '''
                 if loss < self.tolerance:
                     break
@@ -284,7 +289,7 @@ def nicp_v2():
     points_one = frame_one["points"].numpy()
     points_two = frame_two["points"].numpy()
     nicp = NICP(frame_one,frame_two)
-    points_one,color_one,points_two,color_two,W = nicp.precess_v2(down_sample=4096)
+    points_one,color_one,points_two,color_two,W = nicp.precess_with_color(down_sample=4096)
     # n * 3 W = 4n * 3
     one = np.ones((points_one.shape[0],1))
     temp_points = np.hstack((points_one,one))
@@ -303,14 +308,14 @@ def nicp_v2():
     print(f"### transformation diff is {diff}")
     # draw_points(new_points_list,color_one,points_two,color_two)
     
-    with open("./output_0_50/points_one.pkl",'wb') as file:
+    with open("./output/points_one.pkl",'wb') as file:
         points_write = {}
         points_write["points"] = points_one
         points_write["color"] = color_one
         points_write["transform_points"] = new_points_list
         pickle.dump(points_write,file)
 
-    with open("./output_0_50/points_two.pkl",'wb') as file:
+    with open("./output/points_two.pkl",'wb') as file:
         points_write = {}
         points_write["points"] = points_two
         points_write["color"] = color_two
@@ -326,21 +331,16 @@ def nicp():
     print(f"load pkl file and pkl file keys {frame_one.keys()}")
     points_one = frame_one["points"].numpy()
     points_two = frame_two["points"].numpy()
+    start = timeit.default_timer()
     nicp = NICP(frame_one,frame_two,max_iterator=200)
-    points_one,points_two,X = nicp.process_cpu(down_sample=4096*3)
-    # n * 3 W = 4n * 3
-    one = np.ones((points_one.shape[0],1))
-    temp_points = np.hstack((points_one,one))
+    points_one,points_two,W = nicp.precess_torch(down_sample=4096*3)
+    print(f"##### nicp time [{(timeit.default_timer() - start)*1000}] ms")
+    
 
-    new_points_list = []
-    # 坐标转换
-    for index,row in enumerate(temp_points):
-        row = row.reshape(1,-1)
-        new_points = row @ X[index*4:index*4+4,:] # 1*4 4*3
-        new_points_list.append(new_points)
+    matrix_down = nicp.build_distance_matrix(points_one) # D矩阵 n* 4n 
+    # matrix_down (n * 4n) * W(4n * 3) = n * 3
+    new_points_list = matrix_down @ W
 
-    new_points_list = np.array(new_points_list).squeeze()
-    # ipdb.set_trace()
     diff = new_points_list - points_two
     diff = np.sqrt(np.sum(diff ** 2))
     print(f"### transformation diff is {diff}")

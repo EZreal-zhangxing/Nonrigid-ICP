@@ -2,7 +2,8 @@
 
 由于最近在做人体表面重建的项目，因此需要使用到ICP和NICP。
 
-本项目主要是复现论文 [Optimal Step Nonrigid ICP Algorithms for Surface Registration](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=4270190)
+所以使用pytorch进行NICP([Optimal Step Nonrigid ICP Algorithms for Surface Registration](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=4270190))的复现
+
 
 主要用到的包如下：
 
