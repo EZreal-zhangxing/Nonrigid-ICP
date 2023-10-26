@@ -1,4 +1,5 @@
 # NICP
+[![Security Status](https://www.murphysec.com/platform3/v31/badge/1716724400459137024.svg)](https://www.murphysec.com/console/report/1716724397737033728/1716724400459137024) 
 
 由于最近在做人体表面重建的项目，因此需要使用到ICP和NICP。
 
